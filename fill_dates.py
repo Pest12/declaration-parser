@@ -2,11 +2,19 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 import requests
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import time
 import re
 from datetime import datetime
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+import io
+import tempfile
+import os
+import fitz
+import cv2
+import numpy as np
+from pyzbar.pyzbar import decode
+from googleapiclient.http import MediaIoBaseDownload
 
 
 GOOGLE_SHEET_NAME = 'Копия Реестр деклараций'
@@ -16,9 +24,9 @@ CHECK_EXISTING = False
 CHECK_STATUS_ALWAYS = True
 
 SHEET_CONFIGS = [
-    {'name': 'куриные ДС ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14},
-    {'name': 'рыбные дс ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14},
-    {'name': 'прочие ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14},
+    {'name': 'куриные ДС ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10},
+    {'name': 'рыбные дс ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10},
+    {'name': 'прочие ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10},
 ]
 
 REQUEST_DELAY = 0.5
@@ -26,10 +34,8 @@ REQUEST_DELAY = 0.5
 
 # ================= АВТОРИЗАЦИЯ GOOGLE =================
 def get_google_sheet():
-    scope = [
-        'https://spreadsheets.google.com/feeds',
-        'https://www.googleapis.com/auth/drive'
-    ]
+    scope = ['https://spreadsheets.google.com/feeds',
+             'https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
     client = gspread.authorize(creds)
     return client.open(GOOGLE_SHEET_NAME)
@@ -70,6 +76,193 @@ def get_hyperlink_from_cell(spreadsheet_id, sheet_name, row, col):
         return link
     except (IndexError, KeyError, Exception):
         return None
+
+def set_hyperlink_cell(sheet, row, col, url):
+    """
+    Записывает в ячейку (row, col) текст 'ссылка' и прикрепляет гиперссылку url.
+    Использует Sheets API v4 напрямую.
+    """
+    spreadsheet_id = sheet.spreadsheet.id
+    sheet_id = sheet.id
+
+    scope = ['https://www.googleapis.com/auth/spreadsheets']
+    creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
+    service = build('sheets', 'v4', credentials=creds)
+
+    body = {
+        "requests": [
+            {
+                "updateCells": {
+                    "rows": [
+                        {
+                            "values": [
+                                {
+                                    "userEnteredValue": {"stringValue": "ссылка"},
+                                    "textFormatRuns": [
+                                        {
+                                            "startIndex": 0,
+                                            "format": {
+                                                "link": {"uri": url}
+                                            }
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ],
+                    "fields": "userEnteredValue,textFormatRuns",
+                    "start": {
+                        "sheetId": sheet_id,
+                        "rowIndex": row - 1,  # API использует индексацию с 0
+                        "columnIndex": col - 1
+                    }
+                }
+            }
+        ]
+    }
+
+    try:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body=body
+        ).execute()
+    except Exception as e:
+        print(f"  Ошибка при установке гиперссылки: {e}")
+
+
+def download_file_from_hyperlink(url):
+    """
+    Скачивает файл по прямой ссылке или из Google Диска.
+    Возвращает кортеж (file_bytes, file_type), где file_type: 'pdf', 'jpg', 'png' или None.
+    """
+    # Если это Google Диск
+    if 'drive.google.com' in url:
+        file_id = None
+        match = re.search(r'/d/([^/]+)', url)
+        if match:
+            file_id = match.group(1)
+        else:
+            match = re.search(r'id=([^&]+)', url)
+            if match:
+                file_id = match.group(1)
+        if file_id:
+            try:
+                scope = ['https://www.googleapis.com/auth/drive.readonly']
+                creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_FILE, scope)
+                service = build('drive', 'v3', credentials=creds)
+                # Получаем метаданные для определения типа
+                file_meta = service.files().get(fileId=file_id, fields='mimeType').execute()
+                mime_type = file_meta.get('mimeType', '')
+                request = service.files().get_media(fileId=file_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                file_bytes = fh.getvalue()
+                # Определяем тип по MIME
+                if 'pdf' in mime_type:
+                    return file_bytes, 'pdf'
+                elif 'jpeg' in mime_type or 'jpg' in mime_type:
+                    return file_bytes, 'jpg'
+                elif 'png' in mime_type:
+                    return file_bytes, 'png'
+                else:
+                    # Попробуем по сигнатуре
+                    return file_bytes, guess_file_type(file_bytes)
+            except Exception as e:
+                print(f'  Ошибка скачивания с Google Диска: {e}')
+                return None, None
+
+    # Прямая ссылка
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code == 200:
+            content_type = resp.headers.get('Content-Type', '').lower()
+            file_bytes = resp.content
+            if 'pdf' in content_type:
+                return file_bytes, 'pdf'
+            elif 'jpeg' in content_type or 'jpg' in content_type:
+                return file_bytes, 'jpg'
+            elif 'png' in content_type:
+                return file_bytes, 'png'
+            else:
+                return file_bytes, guess_file_type(file_bytes)
+        else:
+            print(f'  Ошибка HTTP {resp.status_code}')
+    except Exception as e:
+        print(f'  Ошибка запроса: {e}')
+    return None, None
+
+def guess_file_type(file_bytes):
+    """Определяет тип файла по сигнатуре."""
+    if file_bytes.startswith(b'%PDF'):
+        return 'pdf'
+    elif file_bytes.startswith(b'\xff\xd8\xff'):
+        return 'jpg'
+    elif file_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'png'
+    else:
+        return None
+
+def extract_qr_from_file(file_bytes, file_type):
+    """
+    Извлекает QR-код из байтов файла.
+    file_type: 'pdf', 'jpg', 'png' (или None – тогда пробуем автоопределение).
+    Возвращает URL или None.
+    """
+    if file_type is None:
+        file_type = guess_file_type(file_bytes)
+    if file_type == 'pdf':
+        return extract_qr_from_pdf(file_bytes)
+    elif file_type in ('jpg', 'png'):
+        return extract_qr_from_image(file_bytes)
+    else:
+        print(f'  Неизвестный тип файла.')
+        return None
+
+def extract_qr_from_pdf(file_bytes):
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception as e:
+        print(f'  Не удалось открыть PDF: {e}')
+        return None
+    for page_num in range(min(len(doc), 3)):
+        page = doc.load_page(page_num)
+        pix = page.get_pixmap(dpi=200)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if img.ndim == 3 and img.shape[2] == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        elif img.ndim == 3 and img.shape[2] == 4:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
+        else:
+            gray = img
+        decoded_objects = decode(gray)
+        for obj in decoded_objects:
+            data = obj.data.decode('utf-8')
+            match = re.search(r'https://pub\.fsa\.gov\.ru/rds/declaration/view/\d+', data)
+            if match:
+                return match.group(0)
+    return None
+
+def extract_qr_from_image(file_bytes):
+    try:
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            print('  Не удалось декодировать изображение.')
+            return None
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        decoded_objects = decode(gray)
+        for obj in decoded_objects:
+            data = obj.data.decode('utf-8')
+            match = re.search(r'https://pub\.fsa\.gov\.ru/rds/declaration/view/\d+', data)
+            if match:
+                return match.group(0)
+    except Exception as e:
+        print(f'  Ошибка обработки изображения: {e}')
+    return None
+
 
 def col_letter(col_number):
     """Переводит номер столбца (1 -> A) в буквенное обозначение."""
@@ -116,22 +309,6 @@ def fetch_declaration_info(decl_id):
             browser.close()
     return start_date, end_date, status
 
-# def parse_dates_from_response(data):
-#     reg_date = data.get('declRegDate')
-#     end_date = data.get('declEndDate')
-#     return format_date(reg_date), format_date(end_date)
-#
-# def format_date(date_str):
-#     if not date_str:
-#         return ''
-#     if re.match(r'\d{2}\.\d{2}\.\d{4}', str(date_str)):
-#         return date_str
-#     try:
-#         dt = datetime.strptime(date_str, '%Y-%m-%d')
-#         return dt.strftime('%d.%m.%Y')
-#     except ValueError:
-#         pass
-#     return str(date_str)
 
 def extract_id_from_url(url_str):
     if not url_str:
@@ -141,6 +318,31 @@ def extract_id_from_url(url_str):
         return match.group(1)
     if url_str.isdigit():
         return url_str
+    return None
+
+def try_get_declaration_url_from_files(spreadsheet_id, sheet_name, row, col_scan, col_pdf):
+    for col in (col_scan, col_pdf):
+        if not col:
+            continue
+        file_url = get_hyperlink_from_cell(spreadsheet_id, sheet_name, row, col)
+        if not file_url:
+            try:
+                sheet = get_google_sheet().worksheet(sheet_name)
+                file_url = sheet.cell(row, col).value
+            except:
+                pass
+        if file_url:
+            print(f'  Скачиваю файл из столбца {col_letter(col)}...')
+            file_bytes, file_type = download_file_from_hyperlink(file_url)
+            if file_bytes:
+                print(f'  Файл получен (тип: {file_type}), ищу QR-код...')
+                qr_url = extract_qr_from_file(file_bytes, file_type)
+                if qr_url:
+                    return qr_url
+                else:
+                    print('  QR-код не найден.')
+            else:
+                print('  Не удалось скачать файл.')
     return None
 
 # ================= ОСНОВНАЯ ЛОГИКА =================
@@ -154,6 +356,8 @@ def extract_google():
         col_start = cfg['col_start']
         col_end = cfg['col_end']
         col_status = cfg.get('col_status', 0)
+        col_scan = cfg.get('col_scan', 0)
+        col_pdf = cfg.get('col_pdf', 0)
 
         try:
             sheet = spreadsheet.worksheet(sheet_name)
@@ -169,26 +373,33 @@ def extract_google():
             existing_end = row[col_end - 1].strip() if len(row) >= col_end else ''
             existing_status = row[col_status - 1].strip() if col_status and len(row) >= col_status else ''
 
-            # Получаем URL и ID
+            # Получаем URL реестра (основной)
             url_cell = get_hyperlink_from_cell(spreadsheet_id, sheet_name, idx, col_url)
             if not url_cell:
                 url_cell = row[col_url - 1].strip()
-            decl_id = extract_id_from_url(url_cell)
+            decl_id = extract_id_from_url(url_cell) if url_cell else None
+
+            # Если нет ссылки на реестр, пробуем извлечь из файлов
+            if not decl_id:
+                print(f'Строка {idx}: нет ссылки на реестр, ищем в файлах...')
+                new_url = try_get_declaration_url_from_files(spreadsheet_id, sheet_name, idx, col_scan, col_pdf)
+                if new_url:
+                    # Записываем найденную ссылку в столбец col_url
+                    set_hyperlink_cell(sheet, idx, col_url, new_url)
+                    print(f'  Записали новую ссылку: {new_url}')
+                    decl_id = extract_id_from_url(new_url)
+                    url_cell = new_url  # для дальнейшего использования
+
             if not decl_id:
                 if url_cell:
-                    print(f'Строка {idx}: не найден ID в {url_cell}')
+                    print(f'Строка {idx}: не удалось извлечь ID')
                 continue
 
-            # Нужны ли даты?
+            # Дальше всё как прежде: определяем необходимость обновления дат/статуса
             need_dates = (not existing_start or not existing_end) or CHECK_EXISTING
-            # Нужен ли статус? (ежедневная проверка только для действующих/пустых)
             need_status = col_status and CHECK_STATUS_ALWAYS
-            if need_status:
-                # Если статус уже есть и он не "Действует", то не проверяем
-                if existing_status and existing_status != 'Действует':
-                    need_status = False
-
-            # Если ни даты, ни статус не нужны, пропускаем
+            if need_status and existing_status and existing_status != 'Действует':
+                need_status = False
             if not need_dates and not need_status:
                 continue
 
@@ -196,7 +407,6 @@ def extract_google():
             start_date, end_date, status = fetch_declaration_info(decl_id)
 
             updated = False
-            # Обновляем даты, если нужно
             if need_dates:
                 if start_date and start_date != existing_start:
                     sheet.update_cell(idx, col_start, start_date)
@@ -209,17 +419,14 @@ def extract_google():
                 if not (start_date or end_date):
                     print('  Даты не получены.')
 
-            # Обновляем статус (с учётом условий)
             if status and col_status:
                 if need_status:
-                    # Режим ежедневной проверки: обновляем только если изменился
                     if status != existing_status:
                         print(f'  Статус изменился: было "{existing_status}", стало "{status}"')
                         # Здесь будет вызов отправки уведомления
                         sheet.update_cell(idx, col_status, status)
                         updated = True
                 else:
-                    # Статус нужен только для первичного заполнения (если пустой)
                     if not existing_status:
                         sheet.update_cell(idx, col_status, status)
                         print(f'  Статус записан: {status}')
