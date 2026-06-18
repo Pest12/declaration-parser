@@ -2,20 +2,25 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 import requests
-from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 import time
 import re
-from datetime import datetime
 import io
-import tempfile
 import os
 import fitz
 import cv2
 import numpy as np
 from pyzbar.pyzbar import decode
 from googleapiclient.http import MediaIoBaseDownload
+import smtplib
+from email.mime.text import MIMEText
 
+
+SMTP_SERVER = 'smtp.gmail.com'
+SMTP_PORT = 587
+SENDER_EMAIL = 'kostya.lugovskikh@gmail.com'
+SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
+RECIPIENT_EMAIL = 'konstantin.l@lab-vkus.ru'
 
 GOOGLE_SHEET_NAME = 'Копия Реестр деклараций'
 SERVICE_ACCOUNT_FILE = 'service_account.json'
@@ -24,9 +29,9 @@ CHECK_EXISTING = False
 CHECK_STATUS_ALWAYS = True
 
 SHEET_CONFIGS = [
-    {'name': 'куриные ДС ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10},
-    {'name': 'рыбные дс ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10},
-    {'name': 'прочие ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10},
+    {'name': 'куриные ДС ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10, 'col_number': 1},
+    {'name': 'рыбные дс ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10, 'col_number': 1},
+    {'name': 'прочие ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10, 'col_number': 1},
 ]
 
 REQUEST_DELAY = 0.5
@@ -345,6 +350,23 @@ def try_get_declaration_url_from_files(spreadsheet_id, sheet_name, row, col_scan
                 print('  Не удалось скачать файл.')
     return None
 
+
+def send_email(subject, body):
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = RECIPIENT_EMAIL
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print('  Уведомление отправлено.')
+    except Exception as e:
+        print(f'  Ошибка отправки email: {e}')
+
+
 # ================= ОСНОВНАЯ ЛОГИКА =================
 def extract_google():
     spreadsheet = get_google_sheet()
@@ -369,6 +391,8 @@ def extract_google():
         all_records = sheet.get_all_values()
 
         for idx, row in enumerate(all_records[1:], start=2):
+            col_number = cfg.get('col_number', 1)  # по умолчанию столбец A
+            number = row[col_number - 1].strip() if len(row) >= col_number else ''
             existing_start = row[col_start - 1].strip() if len(row) >= col_start else ''
             existing_end = row[col_end - 1].strip() if len(row) >= col_end else ''
             existing_status = row[col_status - 1].strip() if col_status and len(row) >= col_status else ''
@@ -423,13 +447,15 @@ def extract_google():
                 if need_status:
                     if status != existing_status:
                         print(f'  Статус изменился: было "{existing_status}", стало "{status}"')
-                        # Здесь будет вызов отправки уведомления
+                        subject = f'Изменение статуса декларации {number}'
+                        body = (f'Статус декларации изменился.\n\n'
+                                f'Номер декларации: {number}\n'
+                                f'Лист: {sheet_name}\n'
+                                f'Предыдущий статус: {existing_status}\n'
+                                f'Новый статус: {status}\n'
+                                f'Ссылка: {url_cell}')
+                        send_email(subject, body)
                         sheet.update_cell(idx, col_status, status)
-                        updated = True
-                else:
-                    if not existing_status:
-                        sheet.update_cell(idx, col_status, status)
-                        print(f'  Статус записан: {status}')
                         updated = True
 
             if not updated:
