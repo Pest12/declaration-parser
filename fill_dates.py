@@ -14,15 +14,19 @@ from pyzbar.pyzbar import decode
 from googleapiclient.http import MediaIoBaseDownload
 import smtplib
 from email.mime.text import MIMEText
+from dotenv import load_dotenv
 
 
-SMTP_SERVER = 'smtp.gmail.com'
-SMTP_PORT = 587
-SENDER_EMAIL = 'kostya.lugovskikh@gmail.com'
+load_dotenv()
+
+
+SMTP_SERVER = os.getenv("SMTP_SERVER")
+SMTP_PORT = os.getenv("SMTP_PORT")
+SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
-RECIPIENT_EMAIL = 'konstantin.l@lab-vkus.ru'
+RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL")
 
-GOOGLE_SHEET_NAME = 'Копия Реестр деклараций'
+GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME")
 SERVICE_ACCOUNT_FILE = 'service_account.json'
 
 CHECK_EXISTING = False
@@ -445,7 +449,9 @@ def extract_google():
 
             if status and col_status:
                 if need_status:
-                    if status != existing_status:
+                    # Ежедневная проверка для статуса "Действует"
+                    if existing_status == 'Действует' and status != 'Действует':
+                        # Статус изменился с "Действует" на другой – отправляем уведомление
                         print(f'  Статус изменился: было "{existing_status}", стало "{status}"')
                         subject = f'Изменение статуса декларации {number}'
                         body = (f'Статус декларации изменился.\n\n'
@@ -456,6 +462,17 @@ def extract_google():
                                 f'Ссылка: {url_cell}')
                         send_email(subject, body)
                         sheet.update_cell(idx, col_status, status)
+                        updated = True
+                    elif status != existing_status:
+                        # Статус изменился, но не с "Действует" – просто обновляем ячейку без письма
+                        sheet.update_cell(idx, col_status, status)
+                        print(f'  Статус обновлён: было "{existing_status}", стало "{status}"')
+                        updated = True
+                else:
+                    # Первичное заполнение (пустая ячейка) – без уведомления
+                    if not existing_status:
+                        sheet.update_cell(idx, col_status, status)
+                        print(f'  Статус записан: {status}')
                         updated = True
 
             if not updated:
