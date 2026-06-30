@@ -288,9 +288,15 @@ def fetch_declaration_info(decl_id):
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         try:
+            # Стратегия загрузки: ждём загрузки DOM, а не всех сетевых запросов
             page.goto(f'https://pub.fsa.gov.ru/rds/declaration/view/{decl_id}/common',
-                      wait_until='networkidle', timeout=40000)
-            page.wait_for_selector('span.card-view-toolbar__title__name', timeout=15000)
+                      wait_until='domcontentloaded', timeout=60000)
+            # Ждём ключевой элемент с тайм-аутом 30 секунд
+            try:
+                page.wait_for_selector('span.card-view-toolbar__title__name', timeout=30000)
+            except Exception:
+                # Если элемент не появился, но страница загрузилась — пробуем получить текст сразу
+                pass
             title_text = page.inner_text('span.card-view-toolbar__title__name')
 
             match_start = re.search(r'от\s*(\d{2}\.\d{2}\.\d{4})', title_text)
@@ -424,7 +430,16 @@ def extract_google(mode='daily'):
                 continue
 
             logger.info('Обрабатываю ID %s', decl_id)
-            start_date, end_date, status = fetch_declaration_info(decl_id)
+            max_retries = 3
+            for attempt in range(max_retries):
+                start_date, end_date, status = fetch_declaration_info(decl_id)
+                if start_date or end_date or status:
+                    break
+                logger.warning(f'Попытка {attempt + 1} не удалась, повтор через 5 сек...')
+                time.sleep(5)
+            else:
+                logger.error(f'Не удалось получить данные после {max_retries} попыток')
+                continue
 
             updated = False
             if need_dates:
