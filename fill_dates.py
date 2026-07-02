@@ -354,7 +354,7 @@ def try_get_declaration_url_from_files(spreadsheet_id, sheet_name, row, col_scan
 
 
 def send_email(subject, body):
-    msg = MIMEText(body)
+    msg = MIMEText(body, _charset='utf-8')
     msg['Subject'] = subject
     msg['From'] = SENDER_EMAIL
     msg['To'] = RECIPIENT_EMAIL
