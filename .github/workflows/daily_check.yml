@@ -2,31 +2,29 @@ name: Daily Status Check
 
 on:
   schedule:
-    - cron: '0 5 * * *'
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 jobs:
   check:
     runs-on: [self-hosted, windows]
+    defaults:
+      run:
+        shell: cmd
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Check PATH
-        run: echo "$PATH"
-        shell: bash
 
       - name: Verify Python installation
         run: |
           python --version
           python -m pip --version
-        shell: bash
 
       - name: Install dependencies
         run: |
           python -m pip install --user -r requirements.txt
           python -m playwright install --with-deps chromium
-        shell: bash
 
       - name: Run daily status check
         env:
@@ -36,4 +34,3 @@ jobs:
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: python main.py --mode daily
-        shell: bash

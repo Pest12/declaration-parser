@@ -8,6 +8,10 @@ on:
 jobs:
   check:
     runs-on: [self-hosted, windows]
+    defaults:
+      run:
+        shell: cmd
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -16,13 +20,11 @@ jobs:
         run: |
           python --version
           python -m pip --version
-        shell: bash
 
       - name: Install dependencies
         run: |
           python -m pip install --user -r requirements.txt
           python -m playwright install --with-deps chromium
-        shell: bash
 
       - name: Run full check
         env:
@@ -32,4 +34,3 @@ jobs:
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: python main.py --mode full
-        shell: bash
