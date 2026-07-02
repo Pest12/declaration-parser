@@ -2,32 +2,28 @@ name: Daily Status Check
 
 on:
   schedule:
-    - cron: '0 4 * * *'
-
+    - cron: '0 5 * * *'
   workflow_dispatch:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, windows]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libzbar0
-
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
           playwright install --with-deps chromium
+        shell: bash
 
-      - name: Run daily check
+      - name: Run daily status check
         env:
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
@@ -35,3 +31,4 @@ jobs:
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: python main.py --mode daily
+        shell: bash
