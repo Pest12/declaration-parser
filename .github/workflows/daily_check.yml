@@ -28,7 +28,6 @@ jobs:
 
       - name: Run daily status check
         env:
-          PYTHONIOENCODING: utf-8
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}

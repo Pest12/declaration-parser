@@ -30,17 +30,15 @@ logger.setLevel(logging.INFO)
 
 formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
 
-file_handler = logging.FileHandler('declaration_monitor.log', encoding='utf-8')
+file_handler = logging.FileHandler('declaration_monitor.log')
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
-import os
-if not os.getenv('CI'):
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 SMTP_SERVER = os.getenv("SMTP_SERVER")
 SMTP_PORT = os.getenv("SMTP_PORT")
@@ -153,7 +151,7 @@ def set_hyperlink_cell(sheet, row, col, url):
             body=body
         ).execute()
     except Exception as e:
-        logger.error('Ошибка при установке гиперссылки %s', e)
+        logger.error('Fail to access hyperlink %s', e)
 
 
 def download_file_from_hyperlink(url):
@@ -190,7 +188,7 @@ def download_file_from_hyperlink(url):
                 else:
                     return file_bytes, guess_file_type(file_bytes)
             except Exception as e:
-                logger.error('Ошибка скачивания с Google Disk %s', e)
+                logger.error('Loading error from Google Disc %s', e)
                 return None, None
 
     try:
@@ -209,7 +207,7 @@ def download_file_from_hyperlink(url):
         else:
             logger.error('шибка HTTP %s', resp.status_code)
     except Exception as e:
-        logger.error('Ошибка запроса %s', e)
+        logger.error('Access error %s', e)
     return None, None
 
 def guess_file_type(file_bytes):
@@ -230,14 +228,14 @@ def extract_qr_from_file(file_bytes, file_type):
     elif file_type in ('jpg', 'png'):
         return extract_qr_from_image(file_bytes)
     else:
-        logger.error('Неизвестный тип файла')
+        logger.error('Unknown file')
         return None
 
 def extract_qr_from_pdf(file_bytes):
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as e:
-        logger.error('Не удалось открыть pdf %s', e)
+        logger.error('Fail to open to pdf file %s', e)
         return None
     for page_num in range(min(len(doc), 3)):
         page = doc.load_page(page_num)
@@ -262,7 +260,7 @@ def extract_qr_from_image(file_bytes):
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
-            logger.error('Не удалось декадировать изображение')
+            logger.error("Can't decode image")
             return None
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         decoded_objects = decode(gray)
@@ -272,7 +270,7 @@ def extract_qr_from_image(file_bytes):
             if match:
                 return match.group(0)
     except Exception as e:
-        logger.error('Ошибка обработки изображения %s', e)
+        logger.error('Image fail %s', e)
     return None
 
 
@@ -318,7 +316,7 @@ def fetch_declaration_info(decl_id):
                 if status_elem:
                     status = status_elem.inner_text().strip()
         except Exception as e:
-            logger.error('Ошибка получения данных %s', e)
+            logger.error("Can't get access to data %s", e)
             start_date = end_date = status = None
         finally:
             browser.close()
@@ -367,7 +365,7 @@ def send_email(subject, body):
         server.send_message(msg)
         server.quit()
     except Exception as e:
-        logger.error('Ошибка отправки email %s', e)
+        logger.error('Email send error %s', e)
 
 
 def extract_google(mode='daily'):
@@ -395,7 +393,7 @@ def extract_google(mode='daily'):
         except Exception:
             continue
 
-        logger.info('Обрабатываю лист %s', sheet_name)
+        logger.info('Checking list %s', sheet_name)
         all_records = sheet.get_all_values()
 
         for idx, row in enumerate(all_records[1:], start=2):
@@ -414,13 +412,13 @@ def extract_google(mode='daily'):
                 new_url = try_get_declaration_url_from_files(spreadsheet_id, sheet_name, idx, col_scan, col_pdf)
                 if new_url:
                     set_hyperlink_cell(sheet, idx, col_url, new_url)
-                    logger.info('Записали новую ссылку %s', new_url)
+                    logger.info('Write new link %s', new_url)
                     decl_id = extract_id_from_url(new_url)
                     url_cell = new_url
 
             if not decl_id:
                 if url_cell:
-                    logger.error('Не удалось извлечь ID %s', idx)
+                    logger.error('Fail to get ID %s', idx)
                 continue
 
             need_dates = (not existing_start or not existing_end) or CHECK_EXISTING
@@ -430,35 +428,35 @@ def extract_google(mode='daily'):
             if not need_dates and not need_status:
                 continue
 
-            logger.info('Обрабатываю ID %s', decl_id)
+            logger.info('Processing ID %s', decl_id)
             max_retries = 3
             for attempt in range(max_retries):
                 start_date, end_date, status = fetch_declaration_info(decl_id)
                 if start_date or end_date or status:
                     break
-                logger.warning(f'Попытка {attempt + 1} не удалась, повтор через 5 сек...')
+                logger.warning(f'Attempt {attempt + 1} is failed, repeat after 5 sec...')
                 time.sleep(5)
             else:
-                logger.error(f'Не удалось получить данные после {max_retries} попыток')
+                logger.error(f'Failed after {max_retries} попыток')
                 continue
 
             updated = False
             if need_dates:
                 if start_date and start_date != existing_start:
                     sheet.update_cell(idx, col_start, start_date)
-                    logger.info('Обновлена дата регистрации %s', start_date)
+                    logger.info('Update register date %s', start_date)
                     updated = True
                 if end_date and end_date != existing_end:
                     sheet.update_cell(idx, col_end, end_date)
-                    logger.info('Обновлена дата окончания %s', end_date)
+                    logger.info('Update ending date %s', end_date)
                     updated = True
                 if not (start_date or end_date):
-                    logger.error('Даты не получены')
+                    logger.error('Failed to access dates')
 
             if status and col_status:
                 if need_status:
                     if existing_status == 'Действует' and status != 'Действует':
-                        logger.warning('Статус изменился...', status)
+                        logger.warning('Status had changed...', status)
                         subject = f'Изменение статуса декларации {number}'
                         body = (f'Статус декларации изменился.\n\n'
                                 f'Номер декларации: {number}\n'
@@ -471,15 +469,15 @@ def extract_google(mode='daily'):
                         updated = True
                     elif status != existing_status:
                         sheet.update_cell(idx, col_status, status)
-                        logger.warning('Статус обновлен...', status)
+                        logger.warning('Update status...', status)
                         updated = True
                 else:
                     if not existing_status:
                         sheet.update_cell(idx, col_status, status)
-                        logger.info('Статус записан', status)
+                        logger.info('Status has writing', status)
                         updated = True
 
             if not updated:
-                logger.info('Данные уже актуальны')
+                logger.info('Data already relevant')
 
             time.sleep(REQUEST_DELAY)
