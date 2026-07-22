@@ -60,8 +60,8 @@ CHECK_EXISTING = False
 CHECK_STATUS_ALWAYS = True
 
 SHEET_CONFIGS = [
-    {'name': 'куриные ДС ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10, 'col_number': 1},
-    {'name': 'рыбные дс ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10, 'col_number': 1},
+    # {'name': 'куриные ДС ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10, 'col_number': 1},
+    # {'name': 'рыбные дс ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10, 'col_number': 1},
     {'name': 'прочие ЛВ', 'col_url': 11, 'col_start': 6, 'col_end': 7, 'col_status': 14, 'col_scan': 9, 'col_pdf': 10, 'col_number': 1},
 ]
 
@@ -205,7 +205,7 @@ def download_file_from_hyperlink(url):
             else:
                 return file_bytes, guess_file_type(file_bytes)
         else:
-            logger.error('шибка HTTP %s', resp.status_code)
+            logger.error( 'HTTP error %s', resp.status_code)
     except Exception as e:
         logger.error('Access error %s', e)
     return None, None
@@ -281,29 +281,77 @@ def col_letter(col_number):
         result = chr(65 + remainder) + result
     return result
 
+def parse_dates_status_from_text(text):
+    start_date = end_date = status = None
+
+    match = re.search(
+        r'от\s*(\d{2}\.\d{2}\.\d{4})\s*действует\s*до\s*(\d{2}\.\d{2}\.\d{4})',
+        text,
+        re.IGNORECASE
+    )
+    if match:
+        start_date = match.group(1)
+        end_date = match.group(2)
+    else:
+        match = re.search(
+            r'от\s*(\d{2}\.\d{2}\.\d{4})\s*до\s*(\d{2}\.\d{2}\.\d{4})',
+            text,
+            re.IGNORECASE
+        )
+        if match:
+            start_date = match.group(1)
+            end_date = match.group(2)
+
+    status_match = re.search(r'Статус:\s*(\w+)', text, re.IGNORECASE)
+    if status_match:
+        status = status_match.group(1).strip()
+    else:
+        for word in ['Действует', 'Прекращен', 'Приостановлен', 'Архивный']:
+            if word in text:
+                status = word
+                break
+
+    return start_date, end_date, status
+
 
 def fetch_declaration_info(decl_id):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         try:
-            # Стратегия загрузки: ждём загрузки DOM, а не всех сетевых запросов
-            page.goto(f'https://pub.fsa.gov.ru/rds/declaration/view/{decl_id}/common',
-                      wait_until='domcontentloaded', timeout=60000)
-            # Ждём ключевой элемент с тайм-аутом 30 секунд
+            page.goto(
+                f'https://pub.fsa.gov.ru/rds/declaration/view/{decl_id}/common',
+                wait_until='domcontentloaded',
+                timeout=90000
+            )
             try:
-                page.wait_for_selector('span.card-view-toolbar__title__name', timeout=30000)
+                page.wait_for_selector(
+                    'span.card-view-toolbar__title__name',
+                    state='attached',
+                    timeout=30000
+                )
             except Exception:
-                # Если элемент не появился, но страница загрузилась — пробуем получить текст сразу
-                pass
-            title_text = page.inner_text('span.card-view-toolbar__title__name')
+                logger.warning(f'Selector wait timed out for {decl_id}')
+                body_text = page.inner_text('body')
+                start_date, end_date, status = parse_dates_status_from_text(body_text)
+                if any([start_date, end_date, status]):
+                    return start_date, end_date, status
+                raise
 
+            try:
+                title_text = page.inner_text('span.card-view-toolbar__title__name', timeout=15000)
+            except Exception:
+                title_text = page.evaluate(
+                    '(element) => element.innerText',
+                    page.locator('span.card-view-toolbar__title__name')
+                )
+
+            start_date = end_date = status = None
             match_start = re.search(r'от\s*(\d{2}\.\d{2}\.\d{4})', title_text)
             match_end = re.search(r'до\s*(\d{2}\.\d{2}\.\d{4})', title_text)
             start_date = match_start.group(1) if match_start else None
             end_date = match_end.group(1) if match_end else None
 
-            status = None
             status_label = page.query_selector('text=Статус:')
             if status_label:
                 parent = status_label.evaluate('node => node.parentElement')
@@ -315,12 +363,14 @@ def fetch_declaration_info(decl_id):
                 status_elem = page.query_selector('div.text')
                 if status_elem:
                     status = status_elem.inner_text().strip()
+
+            return start_date, end_date, status
+
         except Exception as e:
-            logger.error("Can't get access to data %s", e)
-            start_date = end_date = status = None
+            logger.error(f"Can't get data for {decl_id}: {e}")
+            return None, None, None
         finally:
             browser.close()
-    return start_date, end_date, status
 
 
 def extract_id_from_url(url_str):
@@ -437,7 +487,7 @@ def extract_google(mode='daily'):
                 logger.warning(f'Attempt {attempt + 1} is failed, repeat after 5 sec...')
                 time.sleep(5)
             else:
-                logger.error(f'Failed after {max_retries} попыток')
+                logger.error(f'Failed after {max_retries} tries')
                 continue
 
             updated = False
@@ -456,7 +506,7 @@ def extract_google(mode='daily'):
             if status and col_status:
                 if need_status:
                     if existing_status == 'Действует' and status != 'Действует':
-                        logger.warning('Status had changed...', status)
+                        logger.warning('Status had changed... %s', status)
                         subject = f'Изменение статуса декларации {number}'
                         body = (f'Статус декларации изменился.\n\n'
                                 f'Номер декларации: {number}\n'
